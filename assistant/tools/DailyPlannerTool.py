@@ -237,6 +237,7 @@ class DayContextTool(Toolkit):
         """
         Updates the time range of a recurring routine for a specific day or all days.
         If day is None, it will update across all weekdays that contain the routine.
+
         """
         try:
             if not os.path.exists(self.routine_file):
