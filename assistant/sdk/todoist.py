@@ -3,10 +3,10 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta, time
 from typing import Any, Dict, List, Optional
 
+import requests
 from dateutil.parser import isoparse
 from dotenv import load_dotenv
 
-from assistant.tools.DailyPlannerTool import normalize_time_string
 
 load_dotenv()
 import os
@@ -20,20 +20,30 @@ except ImportError:
 
 
 class TodoistTools(Toolkit):
-    """A toolkit for interacting with Todoist tasks and projects."""
+    """
+    A comprehensive toolkit for interacting with Todoist via the REST API v2.
+    This class wraps the `todoist-api-python` client and exposes methods for tasks,
+    projects, labels, sections, and custom utilities. Each method is heavily documented
+    to explain purpose, parameters, and return values.
+    """
 
     def __init__(self, api_token: Optional[str] = None, **kwargs):
-        """Initialize the Todoist toolkit.
+        """
+        Initialize the TodoistTools toolkit.
+
+        This constructor will:
+        1. Load the API token from the provided argument or environment.
+        2. Instantiate the TodoistAPI client.
+        3. Register all available tool methods for use by the agent.
 
         Args:
-            api_token: Optional Todoist API token. If not provided, will look for TODOIST_API_TOKEN env var
-            create_task: Whether to register the create_task function
-            get_task: Whether to register the get_task function
-            update_task: Whether to register the update_task function
-            close_task: Whether to register the close_task function
-            delete_task: Whether to register the delete_task function
-            get_active_tasks: Whether to register the get_active_tasks function
-            get_projects: Whether to register the get_projects function
+            api_token (Optional[str]): The Todoist API token. If None, will attempt to
+                                      read from TODOIST_API_TOKEN environment variable.
+            **kwargs: Additional keyword arguments passed to the base Toolkit.
+
+        Raises:
+            ValueError: If no API token is found.
+            ImportError: If the `todoist-api-python` package is not installed.
         """
         super().__init__(name="todoist", **kwargs)
 
@@ -65,6 +75,8 @@ class TodoistTools(Toolkit):
         self.register(self.group_tasks_by_day)
         self.register(self.detect_duplicate_tasks)
         self.register(self.delete_duplicate_tasks)
+        self.register(self.add_reminder)
+        self.register(self.delete_task_by_name)
 
         # Project Management
         self.register(self.get_projects)
@@ -82,11 +94,29 @@ class TodoistTools(Toolkit):
         self.register(self.get_sections)
         self.register(self.move_task_to_section)
 
+        # Helpers
+
     # =========== Helpers ===========
 
 
+
     def _task_to_dict(self, task: Any) -> Dict[str, Any]:
-        """Convert a Todoist task to a dictionary with proper typing."""
+        """
+        Convert a Todoist Task object into a serializable dictionary.
+
+        This helper handles the conversion of nested `due` objects and ensures
+        consistency in keys and formatting for downstream JSON encoding.
+
+        Args:
+            task (Any): The Todoist Task object returned by the API client.
+
+        Returns:
+            Dict[str, Any]: A flat dictionary representation of the task, including:
+                - id, content, description, project_id, section_id, parent_id
+                - order, priority, url, comment_count, creator_id, created_at
+                - labels (list of label IDs)
+                - due (nested dict with date, string, datetime, timezone)
+        """
         task_dict: Dict[str, Any] = {
             "id": task.id,
             "content": task.content,
@@ -122,17 +152,20 @@ class TodoistTools(Toolkit):
         labels: Optional[List[str]] = None,
     ) -> str:
         """
-        Create a new task in Todoist.
+        Create a new task in Todoist with optional scheduling and metadata.
+
+        This method wraps `api.add_task` and returns a JSON-encoded dictionary of
+        the created task, or an error message if creation fails.
 
         Args:
-            content: The task content/description
-            project_id: Optional ID of the project to add the task to
-            due_string: Optional due date in natural language (e.g., "tomorrow at 12:00")
-            priority: Optional priority level (1-4, where 4 is highest)
-            labels: Optional list of label names to apply to the task
+            content (str): The human-readable task description.
+            project_id (Optional[str]): ID of the project to place the task in.
+            due_string (Optional[str]): Natural-language due date ("tomorrow at 12:00").
+            priority (Optional[int]): Priority level 1-4 (4 is highest).
+            labels (Optional[List[str]]): List of label names or IDs to tag the task.
 
         Returns:
-            str: JSON string containing the created task
+            str: A JSON string of the created task dictionary or an error object.
         """
         try:
             task = self.api.add_task(
@@ -146,7 +179,15 @@ class TodoistTools(Toolkit):
             return json.dumps({"error": str(e)})
 
     def get_task(self, task_id: str) -> str:
-        """Get a specific task by ID."""
+        """
+        Fetch a single task by its unique ID.
+
+        Args:
+            task_id (str): The ID of the task to retrieve.
+
+        Returns:
+            str: JSON-encoded dictionary of the task, or an error message.
+        """
         try:
             task = self.api.get_task(task_id)
             task_dict = self._task_to_dict(task)
@@ -170,23 +211,25 @@ class TodoistTools(Toolkit):
         section_id: Optional[str] = None,
     ) -> str:
         """
-        Update an existing task with the specified parameters.
+        Update properties of an existing task.
+
+        Only fields explicitly provided (non-None) will be updated.
 
         Args:
-            task_id: The ID of the task to update
-            content: The task content/name
-            description: The task description
-            labels: Array of label names
-            priority: Task priority from 1 (normal) to 4 (urgent)
-            due_string: Human readable date ("next Monday", "tomorrow", etc)
-            due_date: Specific date in YYYY-MM-DD format
-            due_datetime: Specific date and time in RFC3339 format
-            due_lang: 2-letter code specifying language of due_string ("en", "fr", etc)
-            assignee_id: The responsible user ID
-            section_id: ID of the section to move task to
+            task_id (str): ID of the task to update.
+            content (Optional[str]): New content if changing the title.
+            description (Optional[str]): New description text.
+            labels (Optional[List[str]]): Replace with this list of label IDs.
+            priority (Optional[int]): New priority level.
+            due_string (Optional[str]): New natural-language due date.
+            due_date (Optional[str]): New due date in YYYY-MM-DD.
+            due_datetime (Optional[str]): New due datetime in RFC3339.
+            due_lang (Optional[str]): Two-letter language code for due_string.
+            assignee_id (Optional[str]): User ID to assign the task to.
+            section_id (Optional[str]): Section ID to move the task into.
 
         Returns:
-            str: JSON string containing success status or error message
+            str: JSON `{"success": True}` on success or error message.
         """
         try:
             # Build updates dictionary with only provided parameters
@@ -219,8 +262,45 @@ class TodoistTools(Toolkit):
             logger.error(f"Failed to update task: {error_msg}")
             return json.dumps({"error": error_msg})
 
+    def add_reminder(
+            self,
+            task_id: str,
+            due_datetime: str,
+            service: str = "push"
+    ) -> str:
+        """
+        Create a reminder on an existing task.
+        Args:
+          task_id: ID of the task to remind.
+          due_datetime: RFC3339 timestamp, e.g. "2025-04-28T09:00:00Z"
+          service: "push", "email", or "sms"
+        Returns:
+          JSON string of the created reminder.
+        """
+        url = "https://api.todoist.com/reminders"
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "task_id": task_id,
+            "service": service,
+            "due_datetime": due_datetime,
+        }
+        r = requests.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        return r.text
+
     def close_task(self, task_id: str) -> str:
-        """Mark a task as completed."""
+        """
+        Mark a task as completed in Todoist.
+
+        Args:
+            task_id (str): The ID of the task to complete.
+
+        Returns:
+            str: JSON {"success": True} or error message.
+        """
         try:
             success = self.api.close_task(task_id)
             return json.dumps({"success": success})
@@ -229,7 +309,15 @@ class TodoistTools(Toolkit):
             return json.dumps({"error": str(e)})
 
     def delete_task(self, task_id: str) -> str:
-        """Delete a task."""
+        """
+        Permanently remove a task from Todoist.
+
+        Args:
+            task_id (str): The ID of the task to delete.
+
+        Returns:
+            str: JSON {"success": True} or error message.
+        """
         try:
             success = self.api.delete_task(task_id)
             return json.dumps({"success": success})
@@ -237,8 +325,34 @@ class TodoistTools(Toolkit):
             logger.error(f"Failed to delete task: {str(e)}")
             return json.dumps({"error": str(e)})
 
+    def delete_task_by_name(self, task_name: str) -> str:
+        """
+        Helper function to delete a task by its content (name) instead of ID.
+
+        Args:
+            task_name (str): The name of the task to delete.
+
+        Returns:
+            str: JSON {"success": True} if deleted, or error.
+        """
+        try:
+            tasks = self.api.get_tasks()
+            for task in tasks:
+                if task.content.strip().lower() == task_name.strip().lower():
+                    success = self.api.delete_task(task.id)
+                    return json.dumps({"success": success})
+            return json.dumps({"error": f"Task '{task_name}' not found."})
+        except Exception as e:
+            logger.error(f"Failed to delete task by name '{task_name}': {str(e)}")
+            return json.dumps({"error": str(e)})
+
     def get_active_tasks(self) -> str:
-        """Get all active (not completed) tasks."""
+        """
+        Fetch all active (incomplete) tasks across all projects.
+
+        Returns:
+            str: JSON list of task objects or error message.
+        """
         try:
             tasks = self.api.get_tasks()
             tasks_list = []
@@ -259,17 +373,17 @@ class TodoistTools(Toolkit):
             labels: Optional[List[str]] = None,
     ) -> str:
         """
-        Create a recurring task in Todoist using natural language.
+        Create a recurring task using a natural language recurrence rule.
 
         Args:
-            content: The task content (e.g. "Workout")
-            recurrence: Recurring pattern (e.g. "every day at 18:00", "every Monday")
-            project_id: Optional project ID to place the task in
-            priority: Optional task priority (1-4)
-            labels: Optional list of label names
+            content (str): Task description.
+            recurrence (str): Recurrence rule (e.g., "every day at 18:00").
+            project_id (Optional[str]): Project ID.
+            priority (Optional[int]): Priority level.
+            labels (Optional[List[str]]): Labels list.
 
         Returns:
-            str: JSON string of the created task or error
+            str: JSON string of the new recurring task or error.
         """
         return self.create_task(
             content=content,
@@ -281,13 +395,13 @@ class TodoistTools(Toolkit):
 
     def get_tasks_by_label(self, label: str) -> str:
         """
-        Get all active tasks that have the given label.
+        Retrieve all active tasks with a specific label.
 
         Args:
-            label: The label name to filter by
+            label (str): Label name or ID to filter by.
 
         Returns:
-            str: JSON list of matching tasks
+            str: JSON list of matching tasks or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -303,13 +417,13 @@ class TodoistTools(Toolkit):
 
     def get_tasks_by_priority(self, priority: int) -> str:
         """
-        Get all active tasks with the specified priority.
+        Retrieve tasks at a given priority level.
 
         Args:
-            priority: Priority level (1 to 4, where 4 is highest)
+            priority (int): Priority level (1-4).
 
         Returns:
-            str: JSON list of matching tasks
+            str: JSON list of matching tasks or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -325,13 +439,13 @@ class TodoistTools(Toolkit):
 
     def get_tasks_by_project(self, project_id: str) -> str:
         """
-        Get all active tasks within a specific project.
+        Retrieve all active tasks within a project.
 
         Args:
-            project_id: The ID of the project to filter tasks by
+            project_id (str): The project identifier.
 
         Returns:
-            str: JSON list of matching tasks
+            str: JSON list of tasks or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -349,6 +463,12 @@ class TodoistTools(Toolkit):
     from datetime import datetime, time, timezone
 
     def get_overdue_tasks(self) -> str:
+        """
+                Fetch tasks whose due date/time has already passed.
+
+                Returns:
+                    str: JSON list of overdue tasks or error.
+        """
         try:
             now = datetime.now(timezone.utc)
             tasks = self.api.get_tasks()
@@ -385,10 +505,13 @@ class TodoistTools(Toolkit):
 
     def get_task_summary(self) -> str:
         """
-        Return a summary of active tasks: total, overdue, and by priority level.
+        Generate a summary report of active tasks:
+        - Total count
+        - Number overdue
+        - Breakdown by priority
 
         Returns:
-            str: JSON summary report
+            str: JSON summary object or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -418,6 +541,15 @@ class TodoistTools(Toolkit):
             return json.dumps({"error": str(e)})
 
     def get_tasks_by_day(self, date: str) -> str:
+        """
+                Retrieve tasks due on a specific date.
+
+                Args:
+                    date (str): Target date in YYYY-MM-DD format.
+
+                Returns:
+                    str: JSON list of matching tasks or error.
+        """
         try:
             tasks = self.api.get_tasks()
             matching = [
@@ -431,6 +563,15 @@ class TodoistTools(Toolkit):
             return json.dumps({"error": str(e)})
 
     def get_tasks_by_week(self, start_date: str) -> str:
+        """
+                Retrieve tasks due within a week starting from a date.
+
+                Args:
+                    start_date (str): Week start date (YYYY-MM-DD).
+
+                Returns:
+                    str: JSON list of tasks within that 7-day span or error.
+        """
         try:
             start = datetime.strptime(start_date, "%Y-%m-%d").date()
             end = start + timedelta(days=6)
@@ -447,6 +588,15 @@ class TodoistTools(Toolkit):
             return json.dumps({"error": str(e)})
 
     def reschedule_overdue_tasks(self, new_due_string: str = "today") -> str:
+        """
+               Push all overdue tasks to a new due date.
+
+               Args:
+                   new_due_string (str): Natural-language date for rescheduling (default "today").
+
+               Returns:
+                   str: JSON {"rescheduled_tasks": [ids]} or error.
+        """
         try:
             now = datetime.now().replace(tzinfo=None)
             tasks = self.api.get_tasks()
@@ -465,6 +615,12 @@ class TodoistTools(Toolkit):
             return json.dumps({"error": str(e)})
 
     def detect_duplicate_tasks(self) -> str:
+        """
+                Identify tasks with identical content (case-insensitive).
+
+                Returns:
+                    str: JSON {"duplicates": [[id1, id2], ...]} or error.
+        """
         try:
             tasks = self.api.get_tasks()
             content_map = defaultdict(list)
@@ -481,10 +637,10 @@ class TodoistTools(Toolkit):
 
     def delete_duplicate_tasks(self) -> str:
         """
-        Detect and delete duplicate tasks (same content). Keeps only one of each group.
+        Remove duplicate tasks, keeping the first instance.
 
         Returns:
-            JSON string of deleted task IDs
+            str: JSON {"deleted_duplicates": [ids]} or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -510,10 +666,11 @@ class TodoistTools(Toolkit):
 
     def group_tasks_by_day(self) -> str:
         """
-        Groups all tasks by due date (YYYY-MM-DD).
+        Organize tasks into buckets by due date.
 
         Returns:
-            JSON string of grouped tasks: { "2025-04-18": [task1, task2], ... }
+            str: JSON {"YYYY-MM-DD": [tasks], "no_due_date": [...]}
+                 or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -532,10 +689,10 @@ class TodoistTools(Toolkit):
 
     def get_recurring_tasks(self) -> str:
         """
-        Returns all recurring tasks by checking if the due string indicates repetition.
+        List tasks whose due string indicates repetition.
 
         Returns:
-            JSON string of recurring tasks
+            str: JSON list of recurring task objects or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -556,7 +713,12 @@ class TodoistTools(Toolkit):
     # =========== Projects ===========
 
     def get_projects(self) -> str:
-        """Get all projects."""
+        """
+        Fetch all projects accessible to the user.
+
+        Returns:
+            str: JSON list of project objects or error.
+        """
         try:
             projects = self.api.get_projects()
             return json.dumps([project.__dict__ for project in projects])
@@ -566,10 +728,10 @@ class TodoistTools(Toolkit):
 
     def get_inbox_id(self) -> str:
         """
-        Get the project ID of the Inbox.
+        Retrieve the project ID designated as the Inbox.
 
         Returns:
-            str: Inbox project ID or error message
+            str: Inbox project ID or error.
         """
         try:
             projects = self.api.get_projects()
@@ -583,10 +745,10 @@ class TodoistTools(Toolkit):
 
     def count_tasks_by_project(self) -> str:
         """
-        Count how many active tasks exist per project.
+        Count active tasks in each project.
 
         Returns:
-            str: JSON dict of project_id -> task count
+            str: JSON {project_id: count, ...} or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -604,7 +766,13 @@ class TodoistTools(Toolkit):
     # =========== Labels ===========
 
     def get_labels(self) -> list[dict]:
-        """Get all existing labels as a list of dicts."""
+        """
+        Retrieve all labels defined in the user's workspace.
+
+        Returns:
+            List[dict]: Each dict contains label metadata, or
+                        empty list on error.
+        """
         try:
             labels = self.api.get_labels()
             return [label.__dict__ for label in labels]
@@ -622,7 +790,18 @@ class TodoistTools(Toolkit):
     def create_label(self, name: str, color: Optional[str] = None,
                      order: Optional[int] = None,
                      favorite: Optional[bool] = None) -> Optional[str]:
-        """Create a new label and return it as a JSON string."""
+        """
+        Create a new label with optional color, order, and favorite flag.
+        you can browse VALID_LABEL_COLORS to see the available colors.
+        Args:
+            name (str): The label name.
+            color (Optional[str]): One of the valid color strings.
+            order (Optional[int]): Position of the label in lists.
+            favorite (Optional[bool]): Mark as favorite if True.
+
+        Returns:
+            Optional[str]: JSON string of created label or None on error.
+        """
 
         try:
             payload = {
@@ -646,7 +825,15 @@ class TodoistTools(Toolkit):
             return None
 
     def get_or_create_label(self, name: str) -> Optional[str]:
-        """Returns the label ID for an existing or newly created label."""
+        """
+        Lookup a label by name, or create it if not found.
+
+        Args:
+            name (str): Label name to find or create.
+
+        Returns:
+            Optional[str]: Label ID or None on failure.
+        """
         for label in self.get_labels():
             if label["name"].lower() == name.lower():
                 return label["id"]
@@ -662,14 +849,14 @@ class TodoistTools(Toolkit):
 
     def rename_label(self, old_name: str, new_name: str) -> str:
         """
-        Rename a label by name.
+        Change the name of an existing label.
 
         Args:
-            old_name: Current label name
-            new_name: New label name
+            old_name (str): Current label name.
+            new_name (str): Desired new label name.
 
         Returns:
-            str: JSON of success status or error
+            str: JSON {"success": True} or error message.
         """
         try:
             labels = self.api.get_labels()
@@ -687,7 +874,7 @@ class TodoistTools(Toolkit):
         Count how many active tasks are assigned to each label.
 
         Returns:
-            str: JSON dict of label -> count
+            str: JSON {label: count, ...} or error.
         """
         try:
             tasks = self.api.get_tasks()
@@ -705,7 +892,15 @@ class TodoistTools(Toolkit):
     # =========== Sections ===========
 
     def get_sections(self, project_id: str) -> str:
-        """Get all sections within a specific project."""
+        """
+        Fetch all sections within a given project.
+
+        Args:
+            project_id (str): The project identifier.
+
+        Returns:
+            str: JSON list of section objects or error.
+        """
         try:
             sections = self.api.get_sections(project_id=project_id)
             return json.dumps([section.__dict__ for section in sections])
@@ -714,7 +909,16 @@ class TodoistTools(Toolkit):
             return json.dumps({"error": str(e)})
 
     def move_task_to_section(self, task_id: str, section_id: str) -> str:
-        """Move a task to a specific section."""
+        """
+                Relocate a task into a specific section.
+
+                Args:
+                    task_id (str): ID of the task to move.
+                    section_id (str): Destination section ID.
+
+                Returns:
+                    str: JSON {"success": True} or error.
+                """
         try:
             success = self.api.update_task(task_id=task_id, section_id=section_id)
             return json.dumps({"success": success})
@@ -733,13 +937,9 @@ if __name__ == "__main__":
 
     # Initialize the SDK
     todoist_toolkit = TodoistTools()
+    todoist_toolkit.create_task("מתמטיקה")
 
 
-    recurring_task_json = todoist_toolkit.create_recurring_task(
-        content="Do 15 pushups 💪",
-        recurrence="every day at 19:30",
-        labels=["habit", "workout"],
-        priority=3
-    )
-    print("Recurring Task:", recurring_task_json)
+
+
 
