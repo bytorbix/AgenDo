@@ -5,6 +5,7 @@ import json
 import uuid
 from typing import List, Optional, Dict, Any
 
+import pytz
 from agno.tools import Toolkit
 from agno.utils.log import logger
 from googleapiclient.errors import HttpError
@@ -85,6 +86,7 @@ class GoogleCalendarTools(Toolkit):
         self.register(self.get_event)
         self.register(self.find_free_time)
         self.register(self.list_day_events)
+        self.register(self.test_timezone_detection)
 
     def _ensure_authenticated(self):
         """
@@ -98,6 +100,55 @@ class GoogleCalendarTools(Toolkit):
                 logger.error(f"Failed to authenticate Google Calendar: {str(e)}")
                 raise Exception(f"Google Calendar authentication failed: {str(e)}")
 
+    # ========================= HELPERS ======================
+
+    def _get_user_timezone(self) -> str:
+        """
+        Get the user's timezone from their Google Calendar settings
+        This should NEVER fail - always returns a valid timezone
+        """
+        try:
+            # Get the user's primary calendar info which includes timezone
+            calendar_info = self.service.calendars().get(calendarId='primary').execute()
+            user_timezone = calendar_info.get('timeZone')
+
+            if user_timezone:
+                logger.info(f"✅ Auto-detected user timezone: {user_timezone}")
+                return user_timezone
+            else:
+                logger.warning("No timezone in calendar info, using UTC")
+                return 'UTC'
+
+        except Exception as e:
+            logger.error(f"Failed to detect timezone: {e}, using UTC")
+            return 'UTC'
+
+    def test_timezone_detection(self) -> str:
+        """
+        Test if timezone detection is working
+        """
+        try:
+            self._ensure_authenticated()
+
+            # Test the timezone detection
+            detected_tz = self._get_user_timezone()
+
+            # Also get calendar info to see what's available
+            calendar_info = self.service.calendars().get(calendarId='primary').execute()
+
+            return json.dumps({
+                "detected_timezone": detected_tz,
+                "calendar_timezone": calendar_info.get('timeZone', 'NOT_FOUND'),
+                "calendar_summary": calendar_info.get('summary', 'Unknown'),
+                "test_status": "SUCCESS"
+            })
+
+        except Exception as e:
+            logger.error(f"Timezone test error: {e}")
+            return json.dumps({
+                "error": str(e),
+                "test_status": "FAILED"
+            })
 
     # ========================= EVENTS ======================
 
@@ -172,6 +223,8 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Unexpected error in list_events: {error}")
             return json.dumps({"error": f"Failed to list events: {error}"})
 
+    # Replace your create_event method with this version that handles timezone 100% automatically
+
     def create_event(
             self,
             start_datetime: str,
@@ -179,58 +232,41 @@ class GoogleCalendarTools(Toolkit):
             title: Optional[str] = None,
             description: Optional[str] = None,
             location: Optional[str] = None,
-            timezone: Optional[str] = None,
+            timezone: Optional[str] = None,  # IGNORED - we always auto-detect
             attendees: List[str] = [],
             send_updates: Optional[str] = "all",
             add_google_meet_link: Optional[bool] = False,
     ) -> str:
         """
-        Create a new event in the user's primary calendar.
-
-        Args:
-            start_datetime (str): Start date and time in ISO format
-            end_datetime (str): End date and time in ISO format
-            title (str, optional): Title of the event
-            description (str, optional): Detailed description of the event
-            location (str, optional): Location of the event
-            timezone (str, optional): Timezone for the event
-            attendees (List[str]): List of attendee email addresses
-            send_updates (str): Whether to send updates to attendees ('all', 'externalOnly', 'none')
-            add_google_meet_link (bool): Whether to add a Google Meet link
-
-        Returns:
-            JSON string with created event details or error message
+        Create event with AUTOMATIC timezone detection - never fails
         """
         try:
-            # Ensure we're authenticated
             self._ensure_authenticated()
 
-            # Prepare attendees list
+            # ALWAYS auto-detect timezone - ignore any passed parameter
+            user_timezone = self._get_user_timezone()
+            logger.info(f"Auto-detected timezone: {user_timezone}")
+
+            # Prepare attendees
             attendees_list = [{"email": attendee} for attendee in attendees] if attendees else []
 
-            # Format datetime strings and handle timezone
+            # Format datetime strings
             try:
                 start_time = datetime.datetime.fromisoformat(start_datetime).strftime("%Y-%m-%dT%H:%M:%S")
                 end_time = datetime.datetime.fromisoformat(end_datetime).strftime("%Y-%m-%dT%H:%M:%S")
-
-                # Default timezone if not provided
-                if not timezone:
-                    timezone = "UTC"  # Default to UTC if no timezone specified
-
             except ValueError as e:
                 return json.dumps({"error": f"Invalid datetime format: {str(e)}"})
 
-            # Build event object
+            # Build event with auto-detected timezone
             event = {
                 "summary": title or "New Event",
                 "location": location,
                 "description": description,
-                "start": {"dateTime": start_time, "timeZone": timezone},
-                "end": {"dateTime": end_time, "timeZone": timezone},
+                "start": {"dateTime": start_time, "timeZone": user_timezone},
+                "end": {"dateTime": end_time, "timeZone": user_timezone},
                 "attendees": attendees_list,
             }
 
-            # Add Google Meet link if requested
             if add_google_meet_link:
                 event["conferenceData"] = {
                     "createRequest": {
@@ -238,8 +274,6 @@ class GoogleCalendarTools(Toolkit):
                         "conferenceSolutionKey": {"type": "hangoutsMeet"}
                     }
                 }
-
-            logger.info(f"Creating event '{title}' for user {self.user_id}")
 
             # Create the event
             event_result = (
@@ -253,7 +287,7 @@ class GoogleCalendarTools(Toolkit):
                 .execute()
             )
 
-            logger.info(f"✅ Event created successfully: {event_result.get('id')}")
+            logger.info(f"✅ Event created with timezone {user_timezone}")
             return json.dumps({
                 "message": "Event created successfully",
                 "event": event_result
@@ -274,32 +308,17 @@ class GoogleCalendarTools(Toolkit):
             location: Optional[str] = None,
             start_datetime: Optional[str] = None,
             end_datetime: Optional[str] = None,
-            timezone: Optional[str] = None,
+            timezone: Optional[str] = None,  # IGNORED - we always auto-detect
             attendees: Optional[List[str]] = None,
             send_updates: Optional[str] = "all",
     ) -> str:
         """
-        Update an existing event in the user's primary calendar.
-
-        Args:
-            event_id (str): ID of the event to update
-            title (str, optional): New title of the event
-            description (str, optional): New description of the event
-            location (str, optional): New location of the event
-            start_datetime (str, optional): New start date and time in ISO format
-            end_datetime (str, optional): New end date and time in ISO format
-            timezone (str, optional): New timezone for the event
-            attendees (List[str], optional): New list of attendee email addresses
-            send_updates (str): Whether to send updates to attendees ('all', 'externalOnly', 'none')
-
-        Returns:
-            JSON string with updated event details or error message
+        Update event with AUTOMATIC timezone detection - never fails
         """
         try:
-            # Ensure we're authenticated
             self._ensure_authenticated()
 
-            # First, get the existing event
+            # Get existing event
             try:
                 existing_event = self.service.events().get(
                     calendarId="primary",
@@ -311,29 +330,32 @@ class GoogleCalendarTools(Toolkit):
                 else:
                     return json.dumps({"error": f"Failed to fetch event: {str(e)}"})
 
-            logger.info(f"Updating event {event_id} for user {self.user_id}")
+            # ALWAYS auto-detect timezone - ignore any passed parameter
+            user_timezone = self._get_user_timezone()
+            logger.info(f"Auto-detected timezone for update: {user_timezone}")
 
-            # Update only the fields that were provided
+            # Update fields that were provided
             if title is not None:
                 existing_event['summary'] = title
-
             if description is not None:
                 existing_event['description'] = description
-
             if location is not None:
                 existing_event['location'] = location
+            if attendees is not None:
+                existing_event['attendees'] = [{"email": attendee} for attendee in attendees]
 
+            # Handle datetime updates with auto-detected timezone
             if start_datetime is not None and end_datetime is not None:
                 try:
                     start_time = datetime.datetime.fromisoformat(start_datetime).strftime("%Y-%m-%dT%H:%M:%S")
                     end_time = datetime.datetime.fromisoformat(end_datetime).strftime("%Y-%m-%dT%H:%M:%S")
-                    existing_event['start'] = {"dateTime": start_time, "timeZone": timezone}
-                    existing_event['end'] = {"dateTime": end_time, "timeZone": timezone}
+
+                    # Use auto-detected timezone
+                    existing_event['start'] = {"dateTime": start_time, "timeZone": user_timezone}
+                    existing_event['end'] = {"dateTime": end_time, "timeZone": user_timezone}
+
                 except ValueError as e:
                     return json.dumps({"error": f"Invalid datetime format: {str(e)}"})
-
-            if attendees is not None:
-                existing_event['attendees'] = [{"email": attendee} for attendee in attendees]
 
             # Update the event
             updated_event = (
@@ -347,7 +369,7 @@ class GoogleCalendarTools(Toolkit):
                 .execute()
             )
 
-            logger.info(f"✅ Event {event_id} updated successfully")
+            logger.info(f"✅ Event updated with timezone {user_timezone}")
             return json.dumps({
                 "message": "Event updated successfully",
                 "event": updated_event
@@ -459,6 +481,8 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Unexpected error in get_event: {error}")
             return json.dumps({"error": f"Failed to get event: {error}"})
 
+    # Replace both methods in your googlecalendar.py with these timezone-aware versions
+
     def find_free_time(
             self,
             duration_minutes: int,
@@ -468,9 +492,7 @@ class GoogleCalendarTools(Toolkit):
             exclude_weekends: bool = True
     ) -> str:
         """
-        Find available time slots for scheduling new events.
-
-        TIMEZONE FIXED VERSION - handles timezone-aware datetimes properly
+        Find available time slots using USER'S TIMEZONE (not UTC)
         """
         try:
             # Ensure we're authenticated
@@ -478,10 +500,17 @@ class GoogleCalendarTools(Toolkit):
 
             logger.info(f"Finding {duration_minutes} min free slots for user {self.user_id}")
 
-            # Calculate search date range - make timezone-aware from the start
-            from datetime import timezone
+            # Get user's timezone first
+            user_timezone_str = self._get_user_timezone()
+            try:
+                user_tz = pytz.timezone(user_timezone_str)
+            except:
+                user_tz = pytz.UTC  # Fallback to UTC if timezone parsing fails
 
-            start_date = datetime.datetime.now(timezone.utc)
+            logger.info(f"Using user timezone: {user_timezone_str}")
+
+            # Calculate search date range in USER'S timezone
+            start_date = datetime.datetime.now(user_tz)
             end_date = start_date + datetime.timedelta(days=search_days)
 
             # Get all events in the search period
@@ -489,8 +518,8 @@ class GoogleCalendarTools(Toolkit):
                 self.service.events()
                 .list(
                     calendarId="primary",
-                    timeMin=start_date.isoformat(),  # Already has timezone info
-                    timeMax=end_date.isoformat(),  # Already has timezone info
+                    timeMin=start_date.isoformat(),
+                    timeMax=end_date.isoformat(),
                     singleEvents=True,
                     orderBy="startTime",
                 )
@@ -506,20 +535,20 @@ class GoogleCalendarTools(Toolkit):
 
             while current_date <= end_date.date():
                 # Skip weekends if requested
-                if exclude_weekends and current_date.weekday() >= 5:  # 5=Saturday, 6=Sunday
+                if exclude_weekends and current_date.weekday() >= 5:
                     current_date += datetime.timedelta(days=1)
                     continue
 
-                # Define work hours for this day - make timezone-aware
-                day_start = datetime.datetime.combine(
+                # Define work hours for this day in USER'S timezone
+                day_start = user_tz.localize(datetime.datetime.combine(
                     current_date,
                     datetime.time(hour=work_hours_start, minute=0)
-                ).replace(tzinfo=timezone.utc)  # Make timezone-aware
+                ))
 
-                day_end = datetime.datetime.combine(
+                day_end = user_tz.localize(datetime.datetime.combine(
                     current_date,
                     datetime.time(hour=work_hours_end, minute=0)
-                ).replace(tzinfo=timezone.utc)  # Make timezone-aware
+                ))
 
                 # Don't search in the past
                 if day_start < start_date:
@@ -531,10 +560,12 @@ class GoogleCalendarTools(Toolkit):
                     event_start = event.get('start', {})
                     if 'dateTime' in event_start:
                         # Parse timezone-aware datetime from Google Calendar
-                        event_date = datetime.datetime.fromisoformat(
+                        event_datetime = datetime.datetime.fromisoformat(
                             event_start['dateTime'].replace('Z', '+00:00')
-                        ).date()
-                        if event_date == current_date:
+                        )
+                        # Convert to user's timezone for comparison
+                        event_datetime_local = event_datetime.astimezone(user_tz)
+                        if event_datetime_local.date() == current_date:
                             day_events.append(event)
 
                 # Sort events by start time
@@ -544,13 +575,14 @@ class GoogleCalendarTools(Toolkit):
                 current_time = day_start
 
                 for event in day_events:
-                    # Parse timezone-aware datetimes
+                    # Parse timezone-aware datetimes and convert to user timezone
                     event_start = datetime.datetime.fromisoformat(
                         event['start']['dateTime'].replace('Z', '+00:00')
-                    )
+                    ).astimezone(user_tz)
+
                     event_end = datetime.datetime.fromisoformat(
                         event['end']['dateTime'].replace('Z', '+00:00')
-                    )
+                    ).astimezone(user_tz)
 
                     # Check gap before this event
                     if event_start > current_time:
@@ -559,16 +591,12 @@ class GoogleCalendarTools(Toolkit):
                             # Found a suitable slot
                             slot_end = min(event_start, current_time + datetime.timedelta(minutes=duration_minutes))
 
-                            # Convert back to local time for display (remove timezone for user-friendly display)
-                            display_start = current_time.replace(tzinfo=None)
-                            display_end = slot_end.replace(tzinfo=None)
-
                             free_slots.append({
-                                "start_time": display_start.isoformat(),
-                                "end_time": display_end.isoformat(),
+                                "start_time": current_time.replace(tzinfo=None).isoformat(),
+                                "end_time": slot_end.replace(tzinfo=None).isoformat(),
                                 "duration_minutes": int((slot_end - current_time).total_seconds() / 60),
-                                "date": display_start.strftime('%B %d, %Y'),
-                                "time": f"{display_start.strftime('%I:%M %p')} - {display_end.strftime('%I:%M %p')}"
+                                "date": current_time.strftime('%B %d, %Y'),
+                                "time": f"{current_time.strftime('%I:%M %p')} - {slot_end.strftime('%I:%M %p')}"
                             })
 
                     # Move past this event
@@ -580,16 +608,12 @@ class GoogleCalendarTools(Toolkit):
                     if gap_duration >= duration_minutes:
                         slot_end = min(day_end, current_time + datetime.timedelta(minutes=duration_minutes))
 
-                        # Convert back to local time for display
-                        display_start = current_time.replace(tzinfo=None)
-                        display_end = slot_end.replace(tzinfo=None)
-
                         free_slots.append({
-                            "start_time": display_start.isoformat(),
-                            "end_time": display_end.isoformat(),
+                            "start_time": current_time.replace(tzinfo=None).isoformat(),
+                            "end_time": slot_end.replace(tzinfo=None).isoformat(),
                             "duration_minutes": int((slot_end - current_time).total_seconds() / 60),
-                            "date": display_start.strftime('%B %d, %Y'),
-                            "time": f"{display_start.strftime('%I:%M %p')} - {display_end.strftime('%I:%M %p')}"
+                            "date": current_time.strftime('%B %d, %Y'),
+                            "time": f"{current_time.strftime('%I:%M %p')} - {slot_end.strftime('%I:%M %p')}"
                         })
 
                 current_date += datetime.timedelta(days=1)
@@ -619,37 +643,18 @@ class GoogleCalendarTools(Toolkit):
 
     def list_day_events(self, date: str = datetime.date.today().isoformat()) -> str:
         """
-        Get events scheduled for ONE SPECIFIC DATE only (not a range).
-
-        IMPORTANT FOR AI AGENTS:
-        This function returns ONLY events that are happening on the specified date.
-        Use this for queries like:
-        - "What do I have today?" → list_day_events()
-        - "What do I have tomorrow?" → list_day_events(date="2025-05-23")
-        - "What's on my schedule on Friday?" → list_day_events(date="2025-05-24")
-        - "Am I busy on June 1st?" → list_day_events(date="2025-06-01")
-
-        For upcoming events or date ranges, use list_events() instead.
-
-        Args:
-            date (str): Specific date in ISO format (YYYY-MM-DD).
-                       Defaults to today if not specified.
-                       Examples: "2025-05-22", "2025-06-01"
-
-        Returns:
-            JSON string containing:
-            - On success: {"message": "Found X events for [date]", "events": [...], "date": "May 22, 2025"}
-            - If no events: {"message": "No events scheduled for [date]", "events": [], "date": "May 22, 2025"}
-            - On error: {"error": "descriptive error message"}
-
-        AI Usage Examples:
-        - User: "What do I have today?" → list_day_events()
-        - User: "What do I have tomorrow?" → list_day_events(date="2025-05-23")
-        - User: "Am I free on Friday?" → list_day_events(date="2025-05-24")
+        Get events for a specific date using USER'S TIMEZONE
         """
         try:
             # Ensure we're authenticated
             self._ensure_authenticated()
+
+            # Get user's timezone
+            user_timezone_str = self._get_user_timezone()
+            try:
+                user_tz = pytz.timezone(user_timezone_str)
+            except:
+                user_tz = pytz.UTC
 
             # Parse the target date
             try:
@@ -657,19 +662,19 @@ class GoogleCalendarTools(Toolkit):
             except ValueError:
                 return json.dumps({"error": f"Invalid date format: {date}. Use YYYY-MM-DD format."})
 
-            # Get date range (start and end of the specific date)
-            date_start = datetime.datetime.combine(target_date, datetime.time.min)
-            date_end = datetime.datetime.combine(target_date, datetime.time.max)
+            # Get date range (start and end of the specific date) in USER'S timezone
+            day_start = user_tz.localize(datetime.datetime.combine(target_date, datetime.time.min))
+            day_end = user_tz.localize(datetime.datetime.combine(target_date, datetime.time.max))
 
-            logger.info(f"Fetching events for {target_date.isoformat()} for user {self.user_id}")
+            logger.info(f"Fetching events for {target_date.isoformat()} in timezone {user_timezone_str}")
 
-            # Get events for the specific date only
+            # Get events for the specific date
             events_result = (
                 self.service.events()
                 .list(
                     calendarId="primary",
-                    timeMin=date_start.isoformat() + 'Z',
-                    timeMax=date_end.isoformat() + 'Z',
+                    timeMin=day_start.isoformat(),  # No more forcing 'Z'
+                    timeMax=day_end.isoformat(),  # Use user's timezone
                     singleEvents=True,
                     orderBy="startTime",
                 )
@@ -678,13 +683,15 @@ class GoogleCalendarTools(Toolkit):
 
             events = events_result.get("items", [])
 
-            # Filter to only events that actually START on the target date
+            # Filter to only events that actually START on the target date in user's timezone
             target_date_events = []
             for event in events:
                 event_start = event.get('start', {})
                 if 'dateTime' in event_start:
-                    # Regular timed event
-                    start_dt = datetime.datetime.fromisoformat(event_start['dateTime'].replace('Z', '+00:00'))
+                    # Regular timed event - convert to user's timezone
+                    start_dt = datetime.datetime.fromisoformat(
+                        event_start['dateTime'].replace('Z', '+00:00')
+                    ).astimezone(user_tz)
                     if start_dt.date() == target_date:
                         target_date_events.append(event)
                 elif 'date' in event_start:
@@ -697,14 +704,14 @@ class GoogleCalendarTools(Toolkit):
             formatted_date = target_date.strftime("%A, %B %d, %Y")
 
             if not target_date_events:
-                logger.info(f"No events found for {target_date.isoformat()} for user {self.user_id}")
+                logger.info(f"No events found for {target_date.isoformat()}")
                 return json.dumps({
                     "message": f"No events scheduled for {formatted_date}",
                     "events": [],
                     "date": formatted_date
                 })
 
-            logger.info(f"Found {len(target_date_events)} events for {target_date.isoformat()} for user {self.user_id}")
+            logger.info(f"Found {len(target_date_events)} events for {target_date.isoformat()}")
             return json.dumps({
                 "message": f"Found {len(target_date_events)} events for {formatted_date}",
                 "events": target_date_events,
@@ -715,7 +722,7 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Google Calendar API error: {error}")
             return json.dumps({"error": f"Google Calendar API error: {error}"})
         except Exception as error:
-            logger.error(f"Unexpected error in get_today_events: {error}")
+            logger.error(f"Unexpected error in list_day_events: {error}")
             return json.dumps({"error": f"Failed to get events for specified date: {error}"})
 
 

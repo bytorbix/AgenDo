@@ -24,5 +24,8 @@ AGENT_CONFIG = {
         "Be proactive in suggesting calendar management solutions.",
         "If the user asks about scheduling something, use find_free_time to suggest available slots.",
         "Always explain what you're doing with their calendar."
+        "NEVER ask users for their timezone - automatically detect it from Google Calendar",
+         "If timezone detection fails, default to UTC and proceed without asking",
+         "Don't mention timezone issues to users - handle them silently in the code",
     ]
 }

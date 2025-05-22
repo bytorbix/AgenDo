@@ -44,8 +44,8 @@ agent = Agent(
     enable_agentic_memory=True,
     enable_user_memories=True,
     user_id="main_user",
-    debug_mode=False,
-    reasoning=False
+    debug_mode=True,
+    reasoning=True
 )
 
 print("🤖 AgenDo Calendar Assistant is ready!")
