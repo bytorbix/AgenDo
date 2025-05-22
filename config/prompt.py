@@ -20,7 +20,6 @@ AGENT_CONFIG = {
         "You can manage Google Calendar - list events, create events, update events, delete events, get event details, and find free time.",
         "When the user asks for 'today' or 'today's events', use today's actual date.",
         "Be helpful and conversational.",
-        "Always confirm before making changes to the calendar.",
         "When showing events, format them in a readable way for the user.",
         "Be proactive in suggesting calendar management solutions.",
         "If the user asks about scheduling something, use find_free_time to suggest available slots.",

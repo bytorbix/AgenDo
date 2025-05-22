@@ -470,51 +470,7 @@ class GoogleCalendarTools(Toolkit):
         """
         Find available time slots for scheduling new events.
 
-        IMPORTANT FOR AI AGENTS:
-        This function helps you find when the user has free time to schedule something.
-        Perfect for questions like "When do I have 2 hours free?" or "Schedule a meeting next week"
-
-        AI Usage Examples:
-        - User: "When can I work on my project for 2 hours?"
-          AI: find_free_time(duration_minutes=120)
-
-        - User: "Find me 30 minutes tomorrow morning"
-          AI: find_free_time(duration_minutes=30, search_days=1, work_hours_end=12)
-
-        - User: "I need 3 hours sometime this weekend"
-          AI: find_free_time(duration_minutes=180, exclude_weekends=False)
-
-        Args:
-            duration_minutes (int): How many minutes of free time needed
-                                  Examples: 30, 60, 120 (for 30min, 1hr, 2hr)
-
-            search_days (int): How many days ahead to search (default: 7)
-                             Examples: 1 (today only), 7 (this week), 14 (two weeks)
-
-            work_hours_start (int): Start of work day in 24h format (default: 9 = 9 AM)
-                                  Examples: 8, 9, 10
-
-            work_hours_end (int): End of work day in 24h format (default: 17 = 5 PM)
-                                Examples: 16, 17, 18
-
-            exclude_weekends (bool): Skip Saturday/Sunday (default: True)
-                                   Set False to include weekends in search
-
-        Returns:
-            JSON string containing:
-            - On success: {"free_slots": [{"start_time": "2025-05-23T10:00:00",
-                                         "end_time": "2025-05-23T12:00:00",
-                                         "duration_minutes": 120,
-                                         "date": "May 23, 2025",
-                                         "time": "10:00 AM - 12:00 PM"},...]}
-            - On error: {"error": "descriptive error message"}
-            - If no slots found: {"free_slots": [], "message": "No free time slots found"}
-
-        AI Notes:
-        - Return slots are sorted by date/time (earliest first)
-        - Each slot is guaranteed to be at least duration_minutes long
-        - Times are in user's calendar timezone
-        - Use start_time/end_time for creating events, date/time for display
+        TIMEZONE FIXED VERSION - handles timezone-aware datetimes properly
         """
         try:
             # Ensure we're authenticated
@@ -522,8 +478,10 @@ class GoogleCalendarTools(Toolkit):
 
             logger.info(f"Finding {duration_minutes} min free slots for user {self.user_id}")
 
-            # Calculate search date range
-            start_date = datetime.datetime.now()
+            # Calculate search date range - make timezone-aware from the start
+            from datetime import timezone
+
+            start_date = datetime.datetime.now(timezone.utc)
             end_date = start_date + datetime.timedelta(days=search_days)
 
             # Get all events in the search period
@@ -531,8 +489,8 @@ class GoogleCalendarTools(Toolkit):
                 self.service.events()
                 .list(
                     calendarId="primary",
-                    timeMin=start_date.isoformat() + 'Z',
-                    timeMax=end_date.isoformat() + 'Z',
+                    timeMin=start_date.isoformat(),  # Already has timezone info
+                    timeMax=end_date.isoformat(),  # Already has timezone info
                     singleEvents=True,
                     orderBy="startTime",
                 )
@@ -552,15 +510,16 @@ class GoogleCalendarTools(Toolkit):
                     current_date += datetime.timedelta(days=1)
                     continue
 
-                # Define work hours for this day
+                # Define work hours for this day - make timezone-aware
                 day_start = datetime.datetime.combine(
                     current_date,
                     datetime.time(hour=work_hours_start, minute=0)
-                )
+                ).replace(tzinfo=timezone.utc)  # Make timezone-aware
+
                 day_end = datetime.datetime.combine(
                     current_date,
                     datetime.time(hour=work_hours_end, minute=0)
-                )
+                ).replace(tzinfo=timezone.utc)  # Make timezone-aware
 
                 # Don't search in the past
                 if day_start < start_date:
@@ -571,6 +530,7 @@ class GoogleCalendarTools(Toolkit):
                 for event in events:
                     event_start = event.get('start', {})
                     if 'dateTime' in event_start:
+                        # Parse timezone-aware datetime from Google Calendar
                         event_date = datetime.datetime.fromisoformat(
                             event_start['dateTime'].replace('Z', '+00:00')
                         ).date()
@@ -584,6 +544,7 @@ class GoogleCalendarTools(Toolkit):
                 current_time = day_start
 
                 for event in day_events:
+                    # Parse timezone-aware datetimes
                     event_start = datetime.datetime.fromisoformat(
                         event['start']['dateTime'].replace('Z', '+00:00')
                     )
@@ -597,12 +558,17 @@ class GoogleCalendarTools(Toolkit):
                         if gap_duration >= duration_minutes:
                             # Found a suitable slot
                             slot_end = min(event_start, current_time + datetime.timedelta(minutes=duration_minutes))
+
+                            # Convert back to local time for display (remove timezone for user-friendly display)
+                            display_start = current_time.replace(tzinfo=None)
+                            display_end = slot_end.replace(tzinfo=None)
+
                             free_slots.append({
-                                "start_time": current_time.isoformat(),
-                                "end_time": slot_end.isoformat(),
+                                "start_time": display_start.isoformat(),
+                                "end_time": display_end.isoformat(),
                                 "duration_minutes": int((slot_end - current_time).total_seconds() / 60),
-                                "date": current_time.strftime('%B %d, %Y'),
-                                "time": f"{current_time.strftime('%I:%M %p')} - {slot_end.strftime('%I:%M %p')}"
+                                "date": display_start.strftime('%B %d, %Y'),
+                                "time": f"{display_start.strftime('%I:%M %p')} - {display_end.strftime('%I:%M %p')}"
                             })
 
                     # Move past this event
@@ -613,12 +579,17 @@ class GoogleCalendarTools(Toolkit):
                     gap_duration = (day_end - current_time).total_seconds() / 60
                     if gap_duration >= duration_minutes:
                         slot_end = min(day_end, current_time + datetime.timedelta(minutes=duration_minutes))
+
+                        # Convert back to local time for display
+                        display_start = current_time.replace(tzinfo=None)
+                        display_end = slot_end.replace(tzinfo=None)
+
                         free_slots.append({
-                            "start_time": current_time.isoformat(),
-                            "end_time": slot_end.isoformat(),
+                            "start_time": display_start.isoformat(),
+                            "end_time": display_end.isoformat(),
                             "duration_minutes": int((slot_end - current_time).total_seconds() / 60),
-                            "date": current_time.strftime('%B %d, %Y'),
-                            "time": f"{current_time.strftime('%I:%M %p')} - {slot_end.strftime('%I:%M %p')}"
+                            "date": display_start.strftime('%B %d, %Y'),
+                            "time": f"{display_start.strftime('%I:%M %p')} - {display_end.strftime('%I:%M %p')}"
                         })
 
                 current_date += datetime.timedelta(days=1)
