@@ -79,6 +79,7 @@ class GoogleCalendarTools(Toolkit):
         self.service = None
 
         # Register available methods
+        self.register(self.list_calendars)
         self.register(self.list_events)
         self.register(self.create_event)
         self.register(self.update_event)
@@ -87,6 +88,11 @@ class GoogleCalendarTools(Toolkit):
         self.register(self.find_free_time)
         self.register(self.list_day_events)
         self.register(self.test_timezone_detection)
+        self.register(self.create_calendar)
+        self.register(self.update_calendar)
+        self.register(self.delete_calendar)
+        self.register(self.move_event)
+        self.register(self.move_multiple_events)
 
     def _ensure_authenticated(self):
         """
@@ -123,6 +129,19 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Failed to detect timezone: {e}, using UTC")
             return 'UTC'
 
+    def _validate_calendar_access(self, calendar_id: str) -> bool:
+        """
+        Check if user has access to a specific calendar
+        """
+        try:
+            # Try to get calendar info - will fail if no access
+            self.service.calendars().get(calendarId=calendar_id).execute()
+            return True
+        except HttpError as e:
+            if e.resp.status in [403, 404]:
+                return False
+            raise e
+
     def test_timezone_detection(self) -> str:
         """
         Test if timezone detection is working
@@ -150,36 +169,505 @@ class GoogleCalendarTools(Toolkit):
                 "test_status": "FAILED"
             })
 
-    # ========================= EVENTS ======================
+    # ========================= CALENDAR MANAGEMENT ======================
 
-    def list_events(self, limit: int = 10, date_from: str = datetime.date.today().isoformat()) -> str:
+    def list_calendars(self) -> str:
         """
-        List events from the user's calendar within a DATE RANGE (from a specific date onwards).
+        List all calendars accessible to the user.
 
-        IMPORTANT FOR AI AGENTS:
-        This function returns events FROM the specified date ONWARDS (not just on that date).
-        Use this for queries like:
-        - "What's coming up this week?"
-        - "Show me upcoming events"
-        - "What do I have starting from tomorrow?"
-
-        For TODAY ONLY events, use get_today_events() instead.
-
-        Args:
-            limit (int): Number of events to return, default is 10
-            date_from (str): Start date in ISO format (YYYY-MM-DD). Events from this date onwards will be returned.
-                           Default is today's date.
+        This allows the agent to discover available calendars and their IDs.
 
         Returns:
-            JSON string with events starting from the specified date onwards or error message
+            JSON string with list of calendars containing:
+            - id: Calendar ID (use this in other functions)
+            - summary: Calendar name/title
+            - description: Calendar description
+            - accessRole: User's access level (owner, reader, writer, etc.)
+            - primary: Whether this is the primary calendar
 
-        AI Usage Examples:
-        - "What's coming up?" → list_events()
-        - "What do I have next week?" → list_events(date_from="2025-05-29")
-        - "Show me 5 upcoming events" → list_events(limit=5)
+        Agent Usage:
+            calendars = list_calendars()
+            # Agent can then use calendar IDs in other functions
         """
         try:
-            # Ensure we're authenticated
+            self._ensure_authenticated()
+
+            logger.info(f"Fetching calendar list for user {self.user_id}")
+
+            # Get calendar list
+            calendar_list = self.service.calendarList().list().execute()
+            calendars = calendar_list.get('items', [])
+
+            # Extract useful information
+            calendar_info = []
+            for calendar in calendars:
+                info = {
+                    'id': calendar.get('id'),
+                    'summary': calendar.get('summary', 'Unknown Calendar'),
+                    'description': calendar.get('description', ''),
+                    'accessRole': calendar.get('accessRole', 'unknown'),
+                    'primary': calendar.get('primary', False),
+                    'selected': calendar.get('selected', False),
+                    'backgroundColor': calendar.get('backgroundColor', ''),
+                    'timeZone': calendar.get('timeZone', '')
+                }
+                calendar_info.append(info)
+
+            logger.info(f"Found {len(calendar_info)} calendars for user {self.user_id}")
+
+            return json.dumps({
+                "message": f"Found {len(calendar_info)} accessible calendars",
+                "calendars": calendar_info
+            })
+
+        except HttpError as error:
+            logger.error(f"Google Calendar API error: {error}")
+            return json.dumps({"error": f"Google Calendar API error: {error}"})
+        except Exception as error:
+            logger.error(f"Unexpected error in list_calendars: {error}")
+            return json.dumps({"error": f"Failed to list calendars: {error}"})
+
+    def create_calendar(
+            self,
+            summary: str,
+            description: Optional[str] = None,
+            location: Optional[str] = None,
+            timezone: Optional[str] = None
+    ) -> str:
+        """
+        Create a new calendar with AUTOMATIC timezone detection.
+
+        Args:
+            summary (str): Calendar name/title (required)
+            description (str): Calendar description (optional)
+            location (str): Calendar location (optional)
+            timezone (str): Calendar timezone (optional, will auto-detect if not provided)
+
+        Returns:
+            JSON string with created calendar information
+
+        Agent Usage Examples:
+            # Create basic calendar
+            create_calendar(summary="Work Calendar")
+
+            # Create detailed calendar
+            create_calendar(summary="Project Alpha", description="Tasks for Project Alpha", location="Office")
+        """
+        try:
+            self._ensure_authenticated()
+
+            # Auto-detect timezone if not provided
+            if not timezone:
+                timezone = self._get_user_timezone()
+                logger.info(f"Auto-detected timezone for new calendar: {timezone}")
+
+            # Build calendar object
+            calendar_body = {
+                'summary': summary,
+                'timeZone': timezone
+            }
+
+            if description:
+                calendar_body['description'] = description
+            if location:
+                calendar_body['location'] = location
+
+            logger.info(f"Creating calendar '{summary}' for user {self.user_id}")
+
+            # Create the calendar
+            created_calendar = self.service.calendars().insert(body=calendar_body).execute()
+
+            logger.info(f"✅ Calendar '{summary}' created successfully with ID: {created_calendar['id']}")
+
+            return json.dumps({
+                "message": f"Calendar '{summary}' created successfully",
+                "calendar": {
+                    "id": created_calendar['id'],
+                    "summary": created_calendar['summary'],
+                    "description": created_calendar.get('description', ''),
+                    "location": created_calendar.get('location', ''),
+                    "timeZone": created_calendar['timeZone']
+                }
+            })
+
+        except HttpError as error:
+            logger.error(f"Google Calendar API error: {error}")
+            return json.dumps({"error": f"Google Calendar API error: {error}"})
+        except Exception as error:
+            logger.error(f"Unexpected error in create_calendar: {error}")
+            return json.dumps({"error": f"Failed to create calendar: {error}"})
+
+    def update_calendar(
+            self,
+            calendar_id: str,
+            summary: Optional[str] = None,
+            description: Optional[str] = None,
+            location: Optional[str] = None,
+            timezone: Optional[str] = None
+    ) -> str:
+        """
+        Update an existing calendar's properties.
+
+        Args:
+            calendar_id (str): ID of the calendar to update (required)
+            summary (str): New calendar name/title (optional)
+            description (str): New calendar description (optional)
+            location (str): New calendar location (optional)
+            timezone (str): New calendar timezone (optional)
+
+        Returns:
+            JSON string with updated calendar information
+
+        Agent Usage Examples:
+            # Update calendar name
+            update_calendar(calendar_id="calendar123@group.calendar.google.com", summary="Updated Work Calendar")
+
+            # Update multiple properties
+            update_calendar(calendar_id="calendar123@group.calendar.google.com",
+                           summary="Project Beta", description="Updated project tasks")
+        """
+        try:
+            self._ensure_authenticated()
+
+            # Validate calendar access
+            if not self._validate_calendar_access(calendar_id):
+                return json.dumps({"error": f"No access to calendar: {calendar_id}"})
+
+            # Get existing calendar to preserve unchanged fields
+            try:
+                existing_calendar = self.service.calendars().get(calendarId=calendar_id).execute()
+            except HttpError as e:
+                if e.resp.status == 404:
+                    return json.dumps({"error": f"Calendar with ID {calendar_id} not found"})
+                else:
+                    return json.dumps({"error": f"Failed to fetch calendar: {str(e)}"})
+
+            # Update only provided fields
+            if summary is not None:
+                existing_calendar['summary'] = summary
+            if description is not None:
+                existing_calendar['description'] = description
+            if location is not None:
+                existing_calendar['location'] = location
+            if timezone is not None:
+                existing_calendar['timeZone'] = timezone
+
+            logger.info(f"Updating calendar {calendar_id} for user {self.user_id}")
+
+            # Update the calendar
+            updated_calendar = self.service.calendars().update(
+                calendarId=calendar_id,
+                body=existing_calendar
+            ).execute()
+
+            logger.info(f"✅ Calendar {calendar_id} updated successfully")
+
+            return json.dumps({
+                "message": f"Calendar updated successfully",
+                "calendar": {
+                    "id": updated_calendar['id'],
+                    "summary": updated_calendar['summary'],
+                    "description": updated_calendar.get('description', ''),
+                    "location": updated_calendar.get('location', ''),
+                    "timeZone": updated_calendar['timeZone']
+                }
+            })
+
+        except HttpError as error:
+            logger.error(f"Google Calendar API error: {error}")
+            return json.dumps({"error": f"Google Calendar API error: {error}"})
+        except Exception as error:
+            logger.error(f"Unexpected error in update_calendar: {error}")
+            return json.dumps({"error": f"Failed to update calendar: {error}"})
+
+    def delete_calendar(self, calendar_id: str) -> str:
+        """
+        Delete a calendar. WARNING: This permanently deletes the calendar and all its events.
+
+        Args:
+            calendar_id (str): ID of the calendar to delete (required)
+                              Note: Cannot delete primary calendar
+
+        Returns:
+            JSON string with deletion confirmation
+
+        Agent Usage Examples:
+            # Delete a secondary calendar
+            delete_calendar(calendar_id="calendar123@group.calendar.google.com")
+
+        Important Notes:
+            - Cannot delete the primary calendar (calendar_id="primary")
+            - This action is irreversible - all events in the calendar will be lost
+            - Only calendars owned by the user can be deleted
+        """
+        try:
+            self._ensure_authenticated()
+
+            # Prevent deletion of primary calendar
+            if calendar_id == "primary":
+                return json.dumps({
+                    "error": "Cannot delete primary calendar. Only secondary calendars can be deleted."
+                })
+
+            # Validate calendar access
+            if not self._validate_calendar_access(calendar_id):
+                return json.dumps({"error": f"No access to calendar: {calendar_id}"})
+
+            # Get calendar info before deletion for confirmation message
+            try:
+                calendar_info = self.service.calendars().get(calendarId=calendar_id).execute()
+                calendar_name = calendar_info.get('summary', calendar_id)
+            except HttpError as e:
+                if e.resp.status == 404:
+                    return json.dumps({"error": f"Calendar with ID {calendar_id} not found"})
+                else:
+                    return json.dumps({"error": f"Failed to fetch calendar info: {str(e)}"})
+
+            logger.info(f"Deleting calendar {calendar_id} ({calendar_name}) for user {self.user_id}")
+
+            # Delete the calendar
+            self.service.calendars().delete(calendarId=calendar_id).execute()
+
+            logger.info(f"✅ Calendar {calendar_id} ({calendar_name}) deleted successfully")
+
+            return json.dumps({
+                "message": f"Calendar '{calendar_name}' deleted successfully",
+                "deleted_calendar": {
+                    "id": calendar_id,
+                    "name": calendar_name
+                },
+                "warning": "This action is irreversible. All events in this calendar have been permanently deleted."
+            })
+
+        except HttpError as error:
+            if error.resp.status == 404:
+                logger.warning(f"Calendar {calendar_id} not found")
+                return json.dumps({"error": f"Calendar with ID {calendar_id} not found"})
+            elif error.resp.status == 403:
+                logger.warning(f"No permission to delete calendar {calendar_id}")
+                return json.dumps({
+                                      "error": f"No permission to delete calendar {calendar_id}. You can only delete calendars you own."})
+            else:
+                logger.error(f"Google Calendar API error: {error}")
+                return json.dumps({"error": f"Google Calendar API error: {error}"})
+        except Exception as error:
+            logger.error(f"Unexpected error in delete_calendar: {error}")
+            return json.dumps({"error": f"Failed to delete calendar: {error}"})
+
+    def move_event(
+            self,
+            event_id: str,
+            source_calendar_id: str = "primary",
+            destination_calendar_id: str = "primary"
+    ) -> str:
+        """
+        Move an event from one calendar to another using Google Calendar's move API.
+
+        Args:
+            event_id (str): ID of the event to move (required)
+            source_calendar_id (str): Calendar containing the event (default: "primary")
+            destination_calendar_id (str): Calendar to move the event to (required)
+
+        Returns:
+            JSON string with moved event information
+
+        Agent Usage Examples:
+            # Move event from primary to specific calendar
+            move_event(event_id="abc123", destination_calendar_id="work@company.com")
+
+            # Move event between specific calendars
+            move_event(event_id="abc123", source_calendar_id="personal@gmail.com",
+                      destination_calendar_id="work@company.com")
+        """
+        try:
+            self._ensure_authenticated()
+
+            # Validate access to both calendars
+            if not self._validate_calendar_access(source_calendar_id):
+                return json.dumps({"error": f"No access to source calendar: {source_calendar_id}"})
+
+            if not self._validate_calendar_access(destination_calendar_id):
+                return json.dumps({"error": f"No access to destination calendar: {destination_calendar_id}"})
+
+            # Check if the event exists in the source calendar
+            try:
+                original_event = self.service.events().get(
+                    calendarId=source_calendar_id,
+                    eventId=event_id
+                ).execute()
+            except HttpError as e:
+                if e.resp.status == 404:
+                    return json.dumps({"error": f"Event with ID {event_id} not found in calendar {source_calendar_id}"})
+                else:
+                    return json.dumps({"error": f"Failed to fetch event: {str(e)}"})
+
+            logger.info(
+                f"Moving event {event_id} from {source_calendar_id} to {destination_calendar_id} for user {self.user_id}")
+
+            # Use Google Calendar's move API
+            moved_event = self.service.events().move(
+                calendarId=source_calendar_id,
+                eventId=event_id,
+                destination=destination_calendar_id
+            ).execute()
+
+            logger.info(f"✅ Event {event_id} moved successfully from {source_calendar_id} to {destination_calendar_id}")
+
+            return json.dumps({
+                "message": f"Event '{original_event.get('summary', 'Untitled')}' moved successfully",
+                "event": moved_event,
+                "source_calendar": source_calendar_id,
+                "destination_calendar": destination_calendar_id
+            })
+
+        except HttpError as error:
+            if error.resp.status == 404:
+                logger.warning(f"Event {event_id} not found in source calendar {source_calendar_id}")
+                return json.dumps({"error": f"Event with ID {event_id} not found in calendar {source_calendar_id}"})
+            elif error.resp.status == 403:
+                logger.warning(f"No permission to move event {event_id}")
+                return json.dumps({"error": f"No permission to move event {event_id}. Check calendar permissions."})
+            else:
+                logger.error(f"Google Calendar API error: {error}")
+                return json.dumps({"error": f"Google Calendar API error: {error}"})
+        except Exception as error:
+            logger.error(f"Unexpected error in move_event: {error}")
+            return json.dumps({"error": f"Failed to move event: {error}"})
+
+    def move_multiple_events(
+            self,
+            event_ids: List[str],
+            source_calendar_id: str = "primary",
+            destination_calendar_id: str = "primary"
+    ) -> str:
+        """
+        Move multiple events from one calendar to another.
+
+        Args:
+            event_ids (List[str]): List of event IDs to move (required)
+            source_calendar_id (str): Calendar containing the events (default: "primary")
+            destination_calendar_id (str): Calendar to move the events to (required)
+
+        Returns:
+            JSON string with results for each moved event
+
+        Agent Usage Examples:
+            # Move multiple events to Events calendar
+            move_multiple_events(event_ids=["abc123", "def456"],
+                                destination_calendar_id="events@group.calendar.google.com")
+        """
+        try:
+            self._ensure_authenticated()
+
+            # Validate access to both calendars
+            if not self._validate_calendar_access(source_calendar_id):
+                return json.dumps({"error": f"No access to source calendar: {source_calendar_id}"})
+
+            if not self._validate_calendar_access(destination_calendar_id):
+                return json.dumps({"error": f"No access to destination calendar: {destination_calendar_id}"})
+
+            results = []
+            successful_moves = 0
+            failed_moves = 0
+
+            logger.info(
+                f"Moving {len(event_ids)} events from {source_calendar_id} to {destination_calendar_id} for user {self.user_id}")
+
+            for event_id in event_ids:
+                try:
+                    # Get event details before moving
+                    original_event = self.service.events().get(
+                        calendarId=source_calendar_id,
+                        eventId=event_id
+                    ).execute()
+
+                    # Move the event
+                    moved_event = self.service.events().move(
+                        calendarId=source_calendar_id,
+                        eventId=event_id,
+                        destination=destination_calendar_id
+                    ).execute()
+
+                    results.append({
+                        "event_id": event_id,
+                        "title": original_event.get('summary', 'Untitled'),
+                        "status": "success",
+                        "message": "Moved successfully"
+                    })
+                    successful_moves += 1
+
+                except HttpError as e:
+                    error_msg = f"API error: {str(e)}"
+                    if e.resp.status == 404:
+                        error_msg = "Event not found"
+                    elif e.resp.status == 403:
+                        error_msg = "Permission denied"
+
+                    results.append({
+                        "event_id": event_id,
+                        "status": "failed",
+                        "error": error_msg
+                    })
+                    failed_moves += 1
+                    logger.warning(f"Failed to move event {event_id}: {error_msg}")
+
+                except Exception as e:
+                    results.append({
+                        "event_id": event_id,
+                        "status": "failed",
+                        "error": f"Unexpected error: {str(e)}"
+                    })
+                    failed_moves += 1
+                    logger.error(f"Unexpected error moving event {event_id}: {str(e)}")
+
+            logger.info(f"✅ Batch move completed: {successful_moves} successful, {failed_moves} failed")
+
+            return json.dumps({
+                "message": f"Batch move completed: {successful_moves} successful, {failed_moves} failed",
+                "successful_moves": successful_moves,
+                "failed_moves": failed_moves,
+                "results": results,
+                "source_calendar": source_calendar_id,
+                "destination_calendar": destination_calendar_id
+            })
+
+        except Exception as error:
+            logger.error(f"Unexpected error in move_multiple_events: {error}")
+            return json.dumps({"error": f"Failed to move events: {error}"})
+
+    # ========================= EVENTS ======================
+
+    def list_events(
+            self,
+            limit: int = 10,
+            date_from: str = datetime.date.today().isoformat(),
+            calendar_id: str = "primary",
+            calendar_ids: Optional[List[str]] = None
+    ) -> str:
+        """
+        List events from one or multiple calendars within a DATE RANGE.
+
+        Args:
+            limit (int): Number of events to return per calendar, default is 10
+            date_from (str): Start date in ISO format (YYYY-MM-DD)
+            calendar_id (str): Single calendar ID to query (default: "primary")
+            calendar_ids (List[str], optional): Multiple calendar IDs to query
+                                               If provided, overrides calendar_id
+
+        Returns:
+            JSON string with events from specified calendar(s)
+
+        Agent Usage Examples:
+            # Current behavior (unchanged)
+            list_events()
+
+            # Specific calendar
+            list_events(calendar_id="work@company.com")
+
+            # Multiple calendars
+            list_events(calendar_ids=["primary", "work@company.com"])
+        """
+        try:
             self._ensure_authenticated()
 
             # Handle date formatting
@@ -192,29 +680,74 @@ class GoogleCalendarTools(Toolkit):
                     logger.warning(f"Invalid date format: {date_from}, using today")
                     date_from = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-            # Get events from Google Calendar
-            logger.info(f"Fetching {limit} events from {date_from} for user {self.user_id}")
+            # Determine which calendars to query
+            if calendar_ids:
+                calendars_to_query = calendar_ids
+                logger.info(f"Querying multiple calendars: {calendar_ids}")
+            else:
+                calendars_to_query = [calendar_id]
+                logger.info(f"Querying single calendar: {calendar_id}")
 
-            events_result = (
-                self.service.events()
-                .list(
-                    calendarId="primary",
-                    timeMin=date_from,
-                    maxResults=limit,
-                    singleEvents=True,
-                    orderBy="startTime",
-                )
-                .execute()
-            )
+            all_events = []
+            calendar_info = {}
 
-            events = events_result.get("items", [])
+            # Query each calendar
+            for cal_id in calendars_to_query:
+                try:
+                    # Validate access to calendar
+                    if not self._validate_calendar_access(cal_id):
+                        logger.warning(f"No access to calendar: {cal_id}")
+                        calendar_info[cal_id] = {"error": "No access to this calendar"}
+                        continue
 
-            if not events:
+                    logger.info(f"Fetching {limit} events from {date_from} for calendar {cal_id}")
+
+                    events_result = (
+                        self.service.events()
+                        .list(
+                            calendarId=cal_id,
+                            timeMin=date_from,
+                            maxResults=limit,
+                            singleEvents=True,
+                            orderBy="startTime",
+                        )
+                        .execute()
+                    )
+
+                    events = events_result.get("items", [])
+
+                    # Add calendar info to each event for multi-calendar queries
+                    for event in events:
+                        event['_calendar_id'] = cal_id
+
+                    all_events.extend(events)
+                    calendar_info[cal_id] = {
+                        "event_count": len(events),
+                        "calendar_name": events_result.get("summary", cal_id)
+                    }
+
+                except HttpError as e:
+                    logger.error(f"Error accessing calendar {cal_id}: {e}")
+                    calendar_info[cal_id] = {"error": f"Calendar API error: {str(e)}"}
+
+            # Sort all events by start time if multiple calendars
+            if len(calendars_to_query) > 1:
+                all_events.sort(key=lambda x: x.get('start', {}).get('dateTime', x.get('start', {}).get('date', '')))
+
+            if not all_events:
                 logger.info(f"No upcoming events found for user {self.user_id}")
-                return json.dumps({"message": "No upcoming events found", "events": []})
+                return json.dumps({
+                    "message": "No upcoming events found",
+                    "events": [],
+                    "calendar_info": calendar_info
+                })
 
-            logger.info(f"Found {len(events)} events for user {self.user_id}")
-            return json.dumps({"message": f"Found {len(events)} events", "events": events})
+            logger.info(f"Found {len(all_events)} total events for user {self.user_id}")
+            return json.dumps({
+                "message": f"Found {len(all_events)} events",
+                "events": all_events,
+                "calendar_info": calendar_info
+            })
 
         except HttpError as error:
             logger.error(f"Google Calendar API error: {error}")
@@ -223,8 +756,6 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Unexpected error in list_events: {error}")
             return json.dumps({"error": f"Failed to list events: {error}"})
 
-    # Replace your create_event method with this version that handles timezone 100% automatically
-
     def create_event(
             self,
             start_datetime: str,
@@ -232,16 +763,40 @@ class GoogleCalendarTools(Toolkit):
             title: Optional[str] = None,
             description: Optional[str] = None,
             location: Optional[str] = None,
+            calendar_id: str = "primary",
             timezone: Optional[str] = None,  # IGNORED - we always auto-detect
             attendees: List[str] = [],
             send_updates: Optional[str] = "all",
             add_google_meet_link: Optional[bool] = False,
     ) -> str:
         """
-        Create event with AUTOMATIC timezone detection - never fails
+        Create event in a specific calendar with AUTOMATIC timezone detection.
+
+        Args:
+            start_datetime (str): Event start time
+            end_datetime (str): Event end time
+            title (str): Event title
+            description (str): Event description
+            location (str): Event location
+            calendar_id (str): Calendar ID to create event in (default: "primary")
+            attendees (List[str]): List of attendee email addresses
+            send_updates (str): Send updates to attendees
+            add_google_meet_link (bool): Add Google Meet link
+
+        Agent Usage Examples:
+            # Create in primary calendar (unchanged behavior)
+            create_event(start_datetime="2025-05-30T09:00:00", end_datetime="2025-05-30T10:00:00", title="Meeting")
+
+            # Create in specific calendar
+            create_event(start_datetime="2025-05-30T09:00:00", end_datetime="2025-05-30T10:00:00",
+                        title="Work Meeting", calendar_id="work@company.com")
         """
         try:
             self._ensure_authenticated()
+
+            # Validate calendar access
+            if not self._validate_calendar_access(calendar_id):
+                return json.dumps({"error": f"No access to calendar: {calendar_id}"})
 
             # ALWAYS auto-detect timezone - ignore any passed parameter
             user_timezone = self._get_user_timezone()
@@ -275,11 +830,11 @@ class GoogleCalendarTools(Toolkit):
                     }
                 }
 
-            # Create the event
+            # Create the event in specified calendar
             event_result = (
                 self.service.events()
                 .insert(
-                    calendarId="primary",
+                    calendarId=calendar_id,
                     body=event,
                     sendUpdates=send_updates,
                     conferenceDataVersion=1 if add_google_meet_link else 0,
@@ -287,10 +842,11 @@ class GoogleCalendarTools(Toolkit):
                 .execute()
             )
 
-            logger.info(f"✅ Event created with timezone {user_timezone}")
+            logger.info(f"✅ Event created in calendar {calendar_id} with timezone {user_timezone}")
             return json.dumps({
                 "message": "Event created successfully",
-                "event": event_result
+                "event": event_result,
+                "calendar_id": calendar_id
             })
 
         except HttpError as error:
@@ -308,25 +864,42 @@ class GoogleCalendarTools(Toolkit):
             location: Optional[str] = None,
             start_datetime: Optional[str] = None,
             end_datetime: Optional[str] = None,
+            calendar_id: str = "primary",
             timezone: Optional[str] = None,  # IGNORED - we always auto-detect
             attendees: Optional[List[str]] = None,
             send_updates: Optional[str] = "all",
     ) -> str:
         """
-        Update event with AUTOMATIC timezone detection - never fails
+        Update event in a specific calendar with AUTOMATIC timezone detection.
+
+        Args:
+            event_id (str): ID of event to update
+            calendar_id (str): Calendar containing the event (default: "primary")
+            Other parameters: Fields to update (optional)
+
+        Agent Usage Examples:
+            # Update event in primary calendar (unchanged behavior)
+            update_event(event_id="abc123", title="New Title")
+
+            # Update event in specific calendar
+            update_event(event_id="abc123", title="New Title", calendar_id="work@company.com")
         """
         try:
             self._ensure_authenticated()
 
-            # Get existing event
+            # Validate calendar access
+            if not self._validate_calendar_access(calendar_id):
+                return json.dumps({"error": f"No access to calendar: {calendar_id}"})
+
+            # Get existing event from specified calendar
             try:
                 existing_event = self.service.events().get(
-                    calendarId="primary",
+                    calendarId=calendar_id,
                     eventId=event_id
                 ).execute()
             except HttpError as e:
                 if e.resp.status == 404:
-                    return json.dumps({"error": f"Event with ID {event_id} not found"})
+                    return json.dumps({"error": f"Event with ID {event_id} not found in calendar {calendar_id}"})
                 else:
                     return json.dumps({"error": f"Failed to fetch event: {str(e)}"})
 
@@ -357,11 +930,11 @@ class GoogleCalendarTools(Toolkit):
                 except ValueError as e:
                     return json.dumps({"error": f"Invalid datetime format: {str(e)}"})
 
-            # Update the event
+            # Update the event in specified calendar
             updated_event = (
                 self.service.events()
                 .update(
-                    calendarId="primary",
+                    calendarId=calendar_id,
                     eventId=event_id,
                     body=existing_event,
                     sendUpdates=send_updates,
@@ -369,10 +942,11 @@ class GoogleCalendarTools(Toolkit):
                 .execute()
             )
 
-            logger.info(f"✅ Event updated with timezone {user_timezone}")
+            logger.info(f"✅ Event updated in calendar {calendar_id} with timezone {user_timezone}")
             return json.dumps({
                 "message": "Event updated successfully",
-                "event": updated_event
+                "event": updated_event,
+                "calendar_id": calendar_id
             })
 
         except HttpError as error:
@@ -385,40 +959,50 @@ class GoogleCalendarTools(Toolkit):
     def delete_event(
             self,
             event_id: str,
+            calendar_id: str = "primary",
             send_updates: Optional[str] = "all"
     ) -> str:
         """
-        Delete an event from the user's primary calendar.
+        Delete an event from a specific calendar.
 
         Args:
             event_id (str): ID of the event to delete
-            send_updates (str): Whether to send updates to attendees ('all', 'externalOnly', 'none')
+            calendar_id (str): Calendar containing the event (default: "primary")
+            send_updates (str): Whether to send updates to attendees
 
-        Returns:
-            JSON string with success message or error message
+        Agent Usage Examples:
+            # Delete from primary calendar (unchanged behavior)
+            delete_event(event_id="abc123")
+
+            # Delete from specific calendar
+            delete_event(event_id="abc123", calendar_id="work@company.com")
         """
         try:
-            # Ensure we're authenticated
             self._ensure_authenticated()
 
-            logger.info(f"Deleting event {event_id} for user {self.user_id}")
+            # Validate calendar access
+            if not self._validate_calendar_access(calendar_id):
+                return json.dumps({"error": f"No access to calendar: {calendar_id}"})
 
-            # Delete the event
+            logger.info(f"Deleting event {event_id} from calendar {calendar_id} for user {self.user_id}")
+
+            # Delete the event from specified calendar
             self.service.events().delete(
-                calendarId="primary",
+                calendarId=calendar_id,
                 eventId=event_id,
                 sendUpdates=send_updates
             ).execute()
 
-            logger.info(f"✅ Event {event_id} deleted successfully")
+            logger.info(f"✅ Event {event_id} deleted successfully from calendar {calendar_id}")
             return json.dumps({
-                "message": f"Event {event_id} deleted successfully"
+                "message": f"Event {event_id} deleted successfully",
+                "calendar_id": calendar_id
             })
 
         except HttpError as error:
             if error.resp.status == 404:
-                logger.warning(f"Event {event_id} not found")
-                return json.dumps({"error": f"Event with ID {event_id} not found"})
+                logger.warning(f"Event {event_id} not found in calendar {calendar_id}")
+                return json.dumps({"error": f"Event with ID {event_id} not found in calendar {calendar_id}"})
             else:
                 logger.error(f"Google Calendar API error: {error}")
                 return json.dumps({"error": f"Google Calendar API error: {error}"})
@@ -426,53 +1010,47 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Unexpected error in delete_event: {error}")
             return json.dumps({"error": f"Failed to delete event: {error}"})
 
-    def get_event(self, event_id: str) -> str:
+    def get_event(self, event_id: str, calendar_id: str = "primary") -> str:
         """
-        Get details of a specific calendar event by ID.
-
-        IMPORTANT FOR AI:
-        - First call list_events() to see available events
-        - Copy the "id" field from the event you want
-        - Then use that ID in this function
-
-        Typical AI workflow:
-        1. events = list_events()
-        2. Find desired event in results
-        3. event_id = events['events'][0]['id']
-        4. details = get_event(event_id)
+        Get details of a specific calendar event by ID from a specific calendar.
 
         Args:
             event_id (str): Event ID from list_events() response
+            calendar_id (str): Calendar containing the event (default: "primary")
 
-        Example:
-            # Step 1: Get events list
-            events = list_events()
-            # Step 2: Extract ID (e.g., "6b20focpa932fjsm9mia7ksat0")
-            # Step 3: Get specific event
-            details = get_event("6b20focpa932fjsm9mia7ksat0")
+        Agent Usage Examples:
+            # Get from primary calendar (unchanged behavior)
+            get_event(event_id="6b20focpa932fjsm9mia7ksat0")
+
+            # Get from specific calendar
+            get_event(event_id="6b20focpa932fjsm9mia7ksat0", calendar_id="work@company.com")
         """
         try:
-            # Ensure we're authenticated
             self._ensure_authenticated()
 
-            logger.info(f"Fetching event {event_id} for user {self.user_id}")
+            # Validate calendar access
+            if not self._validate_calendar_access(calendar_id):
+                return json.dumps({"error": f"No access to calendar: {calendar_id}"})
 
-            # Get the specific event
+            logger.info(f"Fetching event {event_id} from calendar {calendar_id} for user {self.user_id}")
+
+            # Get the specific event from specified calendar
             event = self.service.events().get(
-                calendarId="primary",
+                calendarId=calendar_id,
                 eventId=event_id
             ).execute()
 
-            logger.info(f"✅ Event {event_id} retrieved successfully")
+            logger.info(f"✅ Event {event_id} retrieved successfully from calendar {calendar_id}")
             return json.dumps({
-                "event": event
+                "event": event,
+                "calendar_id": calendar_id
             })
 
         except HttpError as error:
             if error.resp.status == 404:
-                logger.warning(f"Event {event_id} not found")
+                logger.warning(f"Event {event_id} not found in calendar {calendar_id}")
                 return json.dumps({
-                    "error": f"Event with ID {event_id} not found. Use list_events() to see available events."
+                    "error": f"Event with ID {event_id} not found in calendar {calendar_id}. Use list_events() to see available events."
                 })
             else:
                 logger.error(f"Google Calendar API error: {error}")
@@ -481,22 +1059,49 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Unexpected error in get_event: {error}")
             return json.dumps({"error": f"Failed to get event: {error}"})
 
-    # Replace both methods in your googlecalendar.py with these timezone-aware versions
-
     def find_free_time(
             self,
             duration_minutes: int,
             search_days: int = 7,
             work_hours_start: int = 9,
             work_hours_end: int = 17,
-            exclude_weekends: bool = True
+            exclude_weekends: bool = True,
+            calendar_id: str = "primary",
+            calendar_ids: Optional[List[str]] = None
     ) -> str:
         """
-        Find available time slots using USER'S TIMEZONE (not UTC)
+        Find available time slots considering events from one or multiple calendars.
+
+        Args:
+            duration_minutes (int): Required duration in minutes
+            search_days (int): Days to search ahead
+            work_hours_start (int): Start of work hours
+            work_hours_end (int): End of work hours
+            exclude_weekends (bool): Skip weekends
+            calendar_id (str): Single calendar to check (default: "primary")
+            calendar_ids (List[str], optional): Multiple calendars to check
+                                               If provided, overrides calendar_id
+
+        Agent Usage Examples:
+            # Check primary calendar only (unchanged behavior)
+            find_free_time(duration_minutes=60)
+
+            # Check specific calendar
+            find_free_time(duration_minutes=60, calendar_id="work@company.com")
+
+            # Check across multiple calendars
+            find_free_time(duration_minutes=60, calendar_ids=["primary", "work@company.com"])
         """
         try:
-            # Ensure we're authenticated
             self._ensure_authenticated()
+
+            # Determine which calendars to check
+            if calendar_ids:
+                calendars_to_check = calendar_ids
+                logger.info(f"Finding free time across multiple calendars: {calendar_ids}")
+            else:
+                calendars_to_check = [calendar_id]
+                logger.info(f"Finding free time in calendar: {calendar_id}")
 
             logger.info(f"Finding {duration_minutes} min free slots for user {self.user_id}")
 
@@ -505,7 +1110,7 @@ class GoogleCalendarTools(Toolkit):
             try:
                 user_tz = pytz.timezone(user_timezone_str)
             except:
-                user_tz = pytz.UTC  # Fallback to UTC if timezone parsing fails
+                user_tz = pytz.UTC
 
             logger.info(f"Using user timezone: {user_timezone_str}")
 
@@ -513,33 +1118,44 @@ class GoogleCalendarTools(Toolkit):
             start_date = datetime.datetime.now(user_tz)
             end_date = start_date + datetime.timedelta(days=search_days)
 
-            # Get all events in the search period
-            events_result = (
-                self.service.events()
-                .list(
-                    calendarId="primary",
-                    timeMin=start_date.isoformat(),
-                    timeMax=end_date.isoformat(),
-                    singleEvents=True,
-                    orderBy="startTime",
-                )
-                .execute()
-            )
+            # Get all events from all specified calendars
+            all_events = []
+            for cal_id in calendars_to_check:
+                try:
+                    if not self._validate_calendar_access(cal_id):
+                        logger.warning(f"No access to calendar: {cal_id}, skipping")
+                        continue
 
-            events = events_result.get("items", [])
-            logger.info(f"Found {len(events)} existing events to work around")
+                    events_result = (
+                        self.service.events()
+                        .list(
+                            calendarId=cal_id,
+                            timeMin=start_date.isoformat(),
+                            timeMax=end_date.isoformat(),
+                            singleEvents=True,
+                            orderBy="startTime",
+                        )
+                        .execute()
+                    )
 
-            # Find free slots
+                    events = events_result.get("items", [])
+                    all_events.extend(events)
+                    logger.info(f"Found {len(events)} events in calendar {cal_id}")
+
+                except HttpError as e:
+                    logger.error(f"Error accessing calendar {cal_id}: {e}")
+
+            logger.info(f"Found {len(all_events)} total events to work around")
+
+            # Find free slots (same logic as before, but with all events)
             free_slots = []
             current_date = start_date.date()
 
             while current_date <= end_date.date():
-                # Skip weekends if requested
                 if exclude_weekends and current_date.weekday() >= 5:
                     current_date += datetime.timedelta(days=1)
                     continue
 
-                # Define work hours for this day in USER'S timezone
                 day_start = user_tz.localize(datetime.datetime.combine(
                     current_date,
                     datetime.time(hour=work_hours_start, minute=0)
@@ -550,32 +1166,27 @@ class GoogleCalendarTools(Toolkit):
                     datetime.time(hour=work_hours_end, minute=0)
                 ))
 
-                # Don't search in the past
                 if day_start < start_date:
                     day_start = start_date
 
-                # Get events for this specific day
+                # Get events for this specific day from all calendars
                 day_events = []
-                for event in events:
+                for event in all_events:
                     event_start = event.get('start', {})
                     if 'dateTime' in event_start:
-                        # Parse timezone-aware datetime from Google Calendar
                         event_datetime = datetime.datetime.fromisoformat(
                             event_start['dateTime'].replace('Z', '+00:00')
                         )
-                        # Convert to user's timezone for comparison
                         event_datetime_local = event_datetime.astimezone(user_tz)
                         if event_datetime_local.date() == current_date:
                             day_events.append(event)
 
-                # Sort events by start time
                 day_events.sort(key=lambda x: x['start']['dateTime'])
 
                 # Find gaps between events
                 current_time = day_start
 
                 for event in day_events:
-                    # Parse timezone-aware datetimes and convert to user timezone
                     event_start = datetime.datetime.fromisoformat(
                         event['start']['dateTime'].replace('Z', '+00:00')
                     ).astimezone(user_tz)
@@ -588,7 +1199,6 @@ class GoogleCalendarTools(Toolkit):
                     if event_start > current_time:
                         gap_duration = (event_start - current_time).total_seconds() / 60
                         if gap_duration >= duration_minutes:
-                            # Found a suitable slot
                             slot_end = min(event_start, current_time + datetime.timedelta(minutes=duration_minutes))
 
                             free_slots.append({
@@ -599,7 +1209,6 @@ class GoogleCalendarTools(Toolkit):
                                 "time": f"{current_time.strftime('%I:%M %p')} - {slot_end.strftime('%I:%M %p')}"
                             })
 
-                    # Move past this event
                     current_time = max(current_time, event_end)
 
                 # Check gap after last event until end of work day
@@ -625,13 +1234,15 @@ class GoogleCalendarTools(Toolkit):
                 logger.info(f"No free slots found for {duration_minutes} minutes")
                 return json.dumps({
                     "free_slots": [],
-                    "message": f"No free time slots of {duration_minutes} minutes found in the next {search_days} days"
+                    "message": f"No free time slots of {duration_minutes} minutes found in the next {search_days} days",
+                    "calendars_checked": calendars_to_check
                 })
 
             logger.info(f"✅ Found {len(free_slots)} free time slots")
             return json.dumps({
                 "free_slots": free_slots,
-                "message": f"Found {len(free_slots)} available time slots"
+                "message": f"Found {len(free_slots)} available time slots",
+                "calendars_checked": calendars_to_check
             })
 
         except HttpError as error:
@@ -641,12 +1252,32 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Unexpected error in find_free_time: {error}")
             return json.dumps({"error": f"Failed to find free time: {error}"})
 
-    def list_day_events(self, date: str = datetime.date.today().isoformat()) -> str:
+    def list_day_events(
+            self,
+            date: str = datetime.date.today().isoformat(),
+            calendar_id: str = "primary",
+            calendar_ids: Optional[List[str]] = None
+    ) -> str:
         """
-        Get events for a specific date using USER'S TIMEZONE
+        Get events for a specific date from one or multiple calendars using USER'S TIMEZONE.
+
+        Args:
+            date (str): Date in YYYY-MM-DD format
+            calendar_id (str): Single calendar to query (default: "primary")
+            calendar_ids (List[str], optional): Multiple calendars to query
+                                               If provided, overrides calendar_id
+
+        Agent Usage Examples:
+            # Get from primary calendar (unchanged behavior)
+            list_day_events(date="2025-05-30")
+
+            # Get from specific calendar
+            list_day_events(date="2025-05-30", calendar_id="work@company.com")
+
+            # Get from multiple calendars
+            list_day_events(date="2025-05-30", calendar_ids=["primary", "work@company.com"])
         """
         try:
-            # Ensure we're authenticated
             self._ensure_authenticated()
 
             # Get user's timezone
@@ -666,56 +1297,88 @@ class GoogleCalendarTools(Toolkit):
             day_start = user_tz.localize(datetime.datetime.combine(target_date, datetime.time.min))
             day_end = user_tz.localize(datetime.datetime.combine(target_date, datetime.time.max))
 
-            logger.info(f"Fetching events for {target_date.isoformat()} in timezone {user_timezone_str}")
+            # Determine which calendars to query
+            if calendar_ids:
+                calendars_to_query = calendar_ids
+                logger.info(f"Fetching events for {target_date.isoformat()} from multiple calendars: {calendar_ids}")
+            else:
+                calendars_to_query = [calendar_id]
+                logger.info(f"Fetching events for {target_date.isoformat()} from calendar: {calendar_id}")
 
-            # Get events for the specific date
-            events_result = (
-                self.service.events()
-                .list(
-                    calendarId="primary",
-                    timeMin=day_start.isoformat(),  # No more forcing 'Z'
-                    timeMax=day_end.isoformat(),  # Use user's timezone
-                    singleEvents=True,
-                    orderBy="startTime",
-                )
-                .execute()
-            )
+            all_events = []
+            calendar_info = {}
 
-            events = events_result.get("items", [])
+            # Query each calendar
+            for cal_id in calendars_to_query:
+                try:
+                    if not self._validate_calendar_access(cal_id):
+                        logger.warning(f"No access to calendar: {cal_id}")
+                        calendar_info[cal_id] = {"error": "No access to this calendar"}
+                        continue
 
-            # Filter to only events that actually START on the target date in user's timezone
-            target_date_events = []
-            for event in events:
-                event_start = event.get('start', {})
-                if 'dateTime' in event_start:
-                    # Regular timed event - convert to user's timezone
-                    start_dt = datetime.datetime.fromisoformat(
-                        event_start['dateTime'].replace('Z', '+00:00')
-                    ).astimezone(user_tz)
-                    if start_dt.date() == target_date:
-                        target_date_events.append(event)
-                elif 'date' in event_start:
-                    # All-day event
-                    start_date = datetime.datetime.fromisoformat(event_start['date']).date()
-                    if start_date == target_date:
-                        target_date_events.append(event)
+                    # Get events for the specific date
+                    events_result = (
+                        self.service.events()
+                        .list(
+                            calendarId=cal_id,
+                            timeMin=day_start.isoformat(),
+                            timeMax=day_end.isoformat(),
+                            singleEvents=True,
+                            orderBy="startTime",
+                        )
+                        .execute()
+                    )
+
+                    events = events_result.get("items", [])
+
+                    # Filter to only events that actually START on the target date in user's timezone
+                    target_date_events = []
+                    for event in events:
+                        event_start = event.get('start', {})
+                        if 'dateTime' in event_start:
+                            start_dt = datetime.datetime.fromisoformat(
+                                event_start['dateTime'].replace('Z', '+00:00')
+                            ).astimezone(user_tz)
+                            if start_dt.date() == target_date:
+                                event['_calendar_id'] = cal_id
+                                target_date_events.append(event)
+                        elif 'date' in event_start:
+                            start_date = datetime.datetime.fromisoformat(event_start['date']).date()
+                            if start_date == target_date:
+                                event['_calendar_id'] = cal_id
+                                target_date_events.append(event)
+
+                    all_events.extend(target_date_events)
+                    calendar_info[cal_id] = {
+                        "event_count": len(target_date_events),
+                        "calendar_name": events_result.get("summary", cal_id)
+                    }
+
+                except HttpError as e:
+                    logger.error(f"Error accessing calendar {cal_id}: {e}")
+                    calendar_info[cal_id] = {"error": f"Calendar API error: {str(e)}"}
+
+            # Sort events by start time
+            all_events.sort(key=lambda x: x.get('start', {}).get('dateTime', x.get('start', {}).get('date', '')))
 
             # Format the date for response
             formatted_date = target_date.strftime("%A, %B %d, %Y")
 
-            if not target_date_events:
+            if not all_events:
                 logger.info(f"No events found for {target_date.isoformat()}")
                 return json.dumps({
                     "message": f"No events scheduled for {formatted_date}",
                     "events": [],
-                    "date": formatted_date
+                    "date": formatted_date,
+                    "calendar_info": calendar_info
                 })
 
-            logger.info(f"Found {len(target_date_events)} events for {target_date.isoformat()}")
+            logger.info(f"Found {len(all_events)} events for {target_date.isoformat()}")
             return json.dumps({
-                "message": f"Found {len(target_date_events)} events for {formatted_date}",
-                "events": target_date_events,
-                "date": formatted_date
+                "message": f"Found {len(all_events)} events for {formatted_date}",
+                "events": all_events,
+                "date": formatted_date,
+                "calendar_info": calendar_info
             })
 
         except HttpError as error:
@@ -725,6 +1388,7 @@ class GoogleCalendarTools(Toolkit):
             logger.error(f"Unexpected error in list_day_events: {error}")
             return json.dumps({"error": f"Failed to get events for specified date: {error}"})
 
+    # ========================= AUTHENTICATION ======================
 
     def is_authenticated(self) -> bool:
         """
@@ -770,9 +1434,17 @@ if __name__ == "__main__":
         # Test authentication status
         print("Auth Status:", calendar_tools.get_auth_status())
 
-        # Test listing events
+        # Test listing calendars
+        calendars_json = calendar_tools.list_calendars()
+        print("Calendars:", calendars_json)
+
+        # Test listing events from primary calendar
         events_json = calendar_tools.list_events(limit=5)
         print("Events:", events_json)
+
+        # Test listing events from multiple calendars
+        # events_json = calendar_tools.list_events(calendar_ids=["primary", "work@company.com"], limit=5)
+        # print("Multi-calendar Events:", events_json)
 
         # For debugging - print events nicely
         print("\n" + "=" * 50)
@@ -781,22 +1453,6 @@ if __name__ == "__main__":
         data = json.loads(events_json)
         for event in data.get('events', []):
             print(print_event(event))
-
-        # Test update and delete (uncomment to test with real event ID)
-        """
-        # Example: Update an event (replace with real event ID)
-        event_id = "your_event_id_here"
-        update_result = calendar_tools.update_event(
-            event_id=event_id,
-            title="Updated Event Title",
-            description="Updated description"
-        )
-        print(f"\nUpdate Result: {update_result}")
-
-        # Example: Delete an event (replace with real event ID)  
-        delete_result = calendar_tools.delete_event(event_id=event_id)
-        print(f"Delete Result: {delete_result}")
-        """
 
     except Exception as e:
         print(f"❌ Error: {e}")
