@@ -7,6 +7,8 @@ from functools import wraps
 from agno.tools import Toolkit
 from agno.utils.log import logger
 
+
+
 try:
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
@@ -56,6 +58,35 @@ def authenticated(func):
     return wrapper
 
 
+def simplify_events(events_json: str) -> str:
+    events = json.loads(events_json)
+    simplified = []
+
+    for event in events:
+        start = event.get("start", {}).get("dateTime")
+        end = event.get("end", {}).get("dateTime")
+
+        def strip_timezone(dt):
+            if dt is None:
+                return None
+            # timezone offsets are always at the end and look like +HH:MM or -HH:MM
+            if '+' in dt[10:]:
+                return dt[:dt.rfind('+')]
+            if '-' in dt[10:]:
+                return dt[:dt.rfind('-')]
+            return dt
+
+        simple_event = {
+            "id": event.get("id"),
+            "summary": event.get("summary"),
+            "start": strip_timezone(start),
+            "end": strip_timezone(end),
+            "description": event.get("description"),
+        }
+        simplified.append(simple_event)
+
+    return json.dumps(simplified, indent=4)
+
 class GoogleCalendarTools(Toolkit):
     def __init__(
         self,
@@ -97,7 +128,7 @@ class GoogleCalendarTools(Toolkit):
         tools.append(self.list_events)
         tools.append(self.create_event)
 
-        super().__init__(name="google_calendar_tools", tools=tools, **kwargs)
+        super().__init__(name="google_calendar_tools", **kwargs)
 
     @authenticated
     def list_events(self, limit: int = 10, date_from: str = datetime.date.today().isoformat()) -> str:
@@ -198,3 +229,9 @@ class GoogleCalendarTools(Toolkit):
         except HttpError as error:
             logger.error(f"An error occurred: {error}")
             return json.dumps({"error": f"An error occurred: {error}"})
+
+
+if __name__ == "__main__":
+    calendar = GoogleCalendarTools(credentials_path="credentials.json", token_path="token.json")
+    events = calendar.list_events()
+    print(simplify_events(events))

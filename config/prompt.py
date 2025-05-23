@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-# Get current date for agent context
+# Get current date for agents context
 current_date = datetime.now().strftime("%A, %B %d, %Y")  # "Thursday, May 22, 2025"
 current_iso_date = datetime.now().strftime("%Y-%m-%d")  # "2025-05-22"
 

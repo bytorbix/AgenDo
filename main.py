@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from agno.agent import Agent, AgentMemory
 from agno.models.openai import OpenAIChat
 from agno.memory.db.sqlite import SqliteMemoryDb
-from agent.tools.sdk.googlecalendar import GoogleCalendarTools
+from agents.tools.sdk.googlecalendar import GoogleCalendarTools
 from config.prompt import AGENT_CONFIG
 from agno.memory.v2.db.sqlite import SqliteMemoryDb
 from agno.memory.v2.memory import Memory
